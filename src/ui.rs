@@ -54,6 +54,7 @@ fn draw_rows(f: &mut Frame, area: Rect, app: &App) {
 fn row_item(row: &Row, app: &App) -> ListItem<'static> {
     let line = match row {
         Row::Submenu { title, .. } => format!("{title} >"),
+        Row::GroupHeader { title } => format!("── {title} ──"),
         Row::Toggle { key, prompt, .. } => {
             let val = app.selection(key).unwrap_or("");
             format!("{prompt:<40} [{val}]")
@@ -64,10 +65,10 @@ fn row_item(row: &Row, app: &App) -> ListItem<'static> {
         }
         Row::Placeholder { label, note } => format!("{label} {note}"),
     };
-    let style = if matches!(row, Row::Placeholder { .. }) {
-        Style::default().add_modifier(Modifier::DIM)
-    } else {
-        Style::default()
+    let style = match row {
+        Row::Placeholder { .. } => Style::default().add_modifier(Modifier::DIM),
+        Row::GroupHeader { .. } => Style::default().add_modifier(Modifier::BOLD),
+        _ => Style::default(),
     };
     ListItem::new(line).style(style)
 }

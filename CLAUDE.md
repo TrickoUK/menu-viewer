@@ -16,8 +16,9 @@ Real-world `*.core.yml` fixtures for manual testing live in a sibling
 checkout: `../batocera.linux/package/batocera/emulators/...` (137
 files as of last count, spanning libretro and standalone emulator
 packages, with real schema variance — see `src/model.rs` doc
-comments for specifics like `group`/`submenu` aliasing and non-string
-choice values).
+comments for specifics like the independent `group`/`submenu`
+semantics (a feature may set either, both, or neither — they're not
+aliases) and non-string choice values).
 
 ## Commands
 
@@ -25,7 +26,7 @@ choice values).
 cargo build                 # debug build
 cargo build --release       # release build (use this for manual TUI testing — snappier redraw)
 cargo test                  # run all unit tests (pure parsing/menu-tree logic, no terminal needed)
-cargo test <test_name>      # run a single test, e.g. `cargo test group_and_submenu_are_aliases`
+cargo test <test_name>      # run a single test, e.g. `cargo test group_and_submenu_combine_into_nested_submenu_under_header`
 cargo run -- <path.core.yml>  # launch the TUI against a yml file
 ```
 
@@ -38,11 +39,11 @@ Since this is a full-screen terminal app, `cargo run` won't behave usefully pipe
 Four modules, each with a single responsibility:
 
 - **`src/model.rs`** — YAML parsing (`CoreYml`/`CustomFeature` structs) and the pure menu-tree builder (`build_menu`). This is where all the yml-schema-quirk handling lives, documented inline:
-  - `submenu:` and `group:` are the same concept (`#[serde(alias = "group")]`); real files use either or both in the same file.
+  - `group:` and `submenu:` are independent fields, not aliases (per EmulationStation's actual `GuiMenu::addFeatures`): `group` produces an inline, non-interactive `Row::GroupHeader` section label clustering the rows that follow it *within the same screen*; `submenu` produces a real drill-down `Row::Submenu` into a separate screen. A feature may set either, both, or neither — real files do all four. Group headers only ever appear at the top level; `build_menu`'s `bucket_by_submenu` helper is applied once for ungrouped features and once per group (scoped to that group's features), so the same submenu name can legitimately produce separate `Row::Submenu`s under different groups.
   - `choices` is parsed as `IndexMap<serde_yaml::Value, serde_yaml::Value>`, not `String`, because unquoted scalars in these files can resolve to numbers/bools rather than strings — and the tool deliberately *reproduces* that instead of normalizing it away, since that's exactly the class of authoring bug (forgetting to quote a label) it exists to catch. `yaml_scalar_to_string` is the display-stringification for this.
-  - Exactly 2 choices → `Row::Toggle` (flips directly on Enter); 3+ → `Row::Choice` (opens a popup). 0 choices (preset/slider-style options) and `shared_features` both become `Row::Placeholder` (inert, dimmed, not interactive) — sliders and cross-file shared-feature definitions are both out of scope for this tool.
-  - Row order matters and is preserved via `indexmap` (not derivable from a plain `serde_yaml::Value`/`BTreeMap`, which would sort alphabetically): ungrouped features in file order, then submenu groups in first-seen order, then `shared_features` appended last.
-  - This module's `#[cfg(test)]` block is the primary regression net — it encodes the schema-variance assumptions above as fixtures (order preservation, alias handling, toggle-vs-choice threshold, placeholder fallbacks, scalar coercion). Extend it rather than hand-testing new edge cases only via the TUI.
+  - Exactly 2 choices → `Row::Toggle` (flips directly on Enter); 3+ → `Row::Choice` (opens a popup). 0 choices (preset/slider-style options) and `shared_features` both become `Row::Placeholder` (inert, dimmed, not interactive) — sliders and cross-file shared-feature definitions are both out of scope for this tool. `Row::GroupHeader` is a fifth, distinct row kind: also inert and landable but rendered bold (not dimmed), since it's a real structural element rather than an out-of-scope one.
+  - Row order matters and is preserved via `indexmap` (not derivable from a plain `serde_yaml::Value`/`BTreeMap`, which would sort alphabetically): ungrouped-and-unsubmenu'd features in file order, then submenu-bucketed ungrouped features, then each group (first-seen order) as a `GroupHeader` followed by that group's own submenu-bucketed rows, then `shared_features` appended last.
+  - This module's `#[cfg(test)]` block is the primary regression net — it encodes the schema-variance assumptions above as fixtures (order preservation, group/submenu independence and combination, toggle-vs-choice threshold, placeholder fallbacks, scalar coercion). Extend it rather than hand-testing new edge cases only via the TUI.
 
 - **`src/app.rs`** — all interactive state and key handling: a `Vec<MenuLevel>` stack for submenu drill-down/back-navigation, a `HashMap<key, selected_value>` for current selections (initialized to each feature's first choice), and an optional `Popup` for the choice-list overlay. `App::handle_key` is the single entry point for all keyboard behavior (Up/Down/Enter/Esc/Backspace/q); popup key handling is dispatched first and returns early, so popup-open state fully intercepts navigation until dismissed.
 

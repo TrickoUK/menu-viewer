@@ -154,6 +154,7 @@ impl<'a> App<'a> {
                     cursor,
                 });
             }
+            Row::GroupHeader { .. } => {}
             Row::Placeholder { .. } => {}
         }
     }
@@ -169,6 +170,7 @@ fn init_selections(rows: &[Row], selections: &mut HashMap<String, String>) {
                 selections.insert(key.clone(), choices[0].1.clone());
             }
             Row::Submenu { rows, .. } => init_selections(rows, selections),
+            Row::GroupHeader { .. } => {}
             Row::Placeholder { .. } => {}
         }
     }

@@ -12,7 +12,7 @@ pub struct CoreYml {
 
 #[derive(Deserialize)]
 pub struct CustomFeature {
-    #[serde(alias = "group")]
+    pub group: Option<String>,
     pub submenu: Option<String>,
     pub prompt: String,
     pub description: Option<String>,
@@ -56,6 +56,13 @@ pub enum Row {
         title: String,
         rows: Vec<Row>,
     },
+    /// An inline, non-interactive section header (from `group:`) that
+    /// clusters the rows following it within the *same* screen — distinct
+    /// from `Submenu`, which drills into a separate screen. See
+    /// `build_menu` for why these never nest inside a `Submenu`.
+    GroupHeader {
+        title: String,
+    },
     Placeholder {
         label: String,
         note: &'static str,
@@ -68,6 +75,7 @@ impl Row {
             Row::Toggle { prompt, .. } => prompt,
             Row::Choice { prompt, .. } => prompt,
             Row::Submenu { title, .. } => title,
+            Row::GroupHeader { title } => title,
             Row::Placeholder { label, .. } => label,
         }
     }
@@ -77,42 +85,64 @@ impl Row {
             Row::Toggle { description, .. } => description.as_deref(),
             Row::Choice { description, .. } => description.as_deref(),
             Row::Submenu { .. } => None,
+            Row::GroupHeader { .. } => None,
             Row::Placeholder { note, .. } => Some(note),
         }
     }
 }
 
-/// Build the top-level menu tree from a parsed core yml, per the ordering
-/// rules in the design doc:
-/// 1. Ungrouped custom_features (file order) become Toggle/Choice rows.
-/// 2. Grouped custom_features are bucketed by first-seen submenu name
-///    (file order within each bucket), appended after ungrouped rows in
-///    first-seen submenu order.
+/// Build the top-level menu tree from a parsed core yml.
+///
+/// `group` and `submenu` are independent EmulationStation concepts (see
+/// `GuiMenu::addFeatures` in es-app), not aliases of each other:
+/// - `group` renders as an inline, non-interactive section header
+///   clustering the rows that follow it within the *same* screen.
+/// - `submenu` renders as a real drill-down into a separate screen.
+/// - A feature may set both: it's clustered under its `group` header, and
+///   that clustered slot is itself a submenu-drilldown row.
+/// - Group headers only ever appear at the top level — EmulationStation's
+///   pushed submenu screens add their features flatly and never nest
+///   another group header inside, so `submenu` bucketing here is always
+///   scoped *within* a single group's slice (or the ungrouped slice), never
+///   the reverse.
+///
+/// Ordering:
+/// 1. Ungrouped custom_features are bucketed by first-seen submenu name
+///    (file order within each bucket); ungrouped-and-unsubmenu'd features
+///    stay as top-level Toggle/Choice/Placeholder rows in file order.
+/// 2. Grouped custom_features are bucketed by first-seen group name; each
+///    group's cluster is emitted as a GroupHeader followed by that group's
+///    own rows, submenu-bucketed exactly as in step 1 but scoped to that
+///    group's features. Groups are emitted in first-seen order, after all
+///    ungrouped rows.
 /// 3. 0-choice custom_features become Placeholder rows in whichever spot
-///    they'd otherwise occupy (top-level or within their submenu).
-/// 4. shared_features become Placeholder rows appended at the very end.
+///    they'd otherwise occupy.
+/// 4. shared_features become Placeholder rows appended at the very end,
+///    unaffected by any group/submenu on custom_features.
 pub fn build_menu(core: &CoreYml) -> Vec<Row> {
-    let mut top_level: Vec<Row> = Vec::new();
-    let mut submenu_order: Vec<String> = Vec::new();
-    let mut submenu_rows: IndexMap<String, Vec<Row>> = IndexMap::new();
+    let mut group_order: Vec<String> = Vec::new();
+    let mut grouped: IndexMap<String, Vec<(&String, &CustomFeature)>> = IndexMap::new();
+    let mut ungrouped: Vec<(&String, &CustomFeature)> = Vec::new();
 
     for (key, feature) in &core.custom_features {
-        let row = feature_to_row(key, feature);
-        match &feature.submenu {
+        match &feature.group {
             Some(name) => {
-                submenu_rows.entry(name.clone()).or_insert_with(|| {
-                    submenu_order.push(name.clone());
+                grouped.entry(name.clone()).or_insert_with(|| {
+                    group_order.push(name.clone());
                     Vec::new()
                 });
-                submenu_rows.get_mut(name).unwrap().push(row);
+                grouped.get_mut(name).unwrap().push((key, feature));
             }
-            None => top_level.push(row),
+            None => ungrouped.push((key, feature)),
         }
     }
 
-    for name in submenu_order {
-        if let Some(rows) = submenu_rows.shift_remove(&name) {
-            top_level.push(Row::Submenu { title: name, rows });
+    let mut top_level: Vec<Row> = bucket_by_submenu(ungrouped);
+
+    for name in group_order {
+        if let Some(features) = grouped.shift_remove(&name) {
+            top_level.push(Row::GroupHeader { title: name });
+            top_level.extend(bucket_by_submenu(features));
         }
     }
 
@@ -124,6 +154,42 @@ pub fn build_menu(core: &CoreYml) -> Vec<Row> {
     }
 
     top_level
+}
+
+/// Bucket a flat slice of (key, feature) pairs by first-seen `submenu`
+/// name (file order preserved within each bucket and among ungrouped
+/// rows). Scoped per-group by `build_menu` (and applied once to the
+/// ungrouped slice), since submenus never nest inside a group differently
+/// than described above.
+fn bucket_by_submenu<'a>(features: Vec<(&'a String, &'a CustomFeature)>) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut submenu_order: Vec<String> = Vec::new();
+    let mut submenu_rows: IndexMap<String, Vec<Row>> = IndexMap::new();
+
+    for (key, feature) in features {
+        let row = feature_to_row(key, feature);
+        match &feature.submenu {
+            Some(name) => {
+                submenu_rows.entry(name.clone()).or_insert_with(|| {
+                    submenu_order.push(name.clone());
+                    Vec::new()
+                });
+                submenu_rows.get_mut(name).unwrap().push(row);
+            }
+            None => rows.push(row),
+        }
+    }
+
+    for name in submenu_order {
+        if let Some(sub_rows) = submenu_rows.shift_remove(&name) {
+            rows.push(Row::Submenu {
+                title: name,
+                rows: sub_rows,
+            });
+        }
+    }
+
+    rows
 }
 
 fn feature_to_row(key: &str, feature: &CustomFeature) -> Row {
@@ -218,12 +284,12 @@ custom_features:
     }
 
     #[test]
-    fn group_and_submenu_are_aliases() {
+    fn group_creates_header_and_clusters_rows() {
         let core = parse(
             r#"
 custom_features:
   a:
-    submenu: ADVANCED
+    group: ADVANCED
     prompt: A
     choices:
       'Off': disabled
@@ -237,16 +303,168 @@ custom_features:
 "#,
         );
         let rows = build_menu(&core);
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 3);
         match &rows[0] {
+            Row::GroupHeader { title } => assert_eq!(title, "ADVANCED"),
+            _ => panic!("expected GroupHeader row"),
+        }
+        assert_eq!(rows[1].prompt(), "A");
+        assert_eq!(rows[2].prompt(), "B");
+    }
+
+    #[test]
+    fn group_order_is_first_seen_and_independent_of_submenu_order() {
+        let core = parse(
+            r#"
+custom_features:
+  a:
+    group: BETA
+    submenu: SUBX
+    prompt: A
+    choices:
+      'Off': disabled
+      'On': enabled
+  b:
+    group: ALPHA
+    submenu: SUBY
+    prompt: B
+    choices:
+      'Off': disabled
+      'On': enabled
+  c:
+    group: BETA
+    submenu: SUBY
+    prompt: C
+    choices:
+      'Off': disabled
+      'On': enabled
+"#,
+        );
+        let rows = build_menu(&core);
+        assert_eq!(rows.len(), 5);
+
+        match &rows[0] {
+            Row::GroupHeader { title } => assert_eq!(title, "BETA"),
+            _ => panic!("expected GroupHeader row"),
+        }
+        match &rows[1] {
             Row::Submenu { title, rows } => {
-                assert_eq!(title, "ADVANCED");
+                assert_eq!(title, "SUBX");
+                assert_eq!(rows[0].prompt(), "A");
+            }
+            _ => panic!("expected Submenu row"),
+        }
+        match &rows[2] {
+            Row::Submenu { title, rows } => {
+                assert_eq!(title, "SUBY");
+                assert_eq!(rows[0].prompt(), "C");
+            }
+            _ => panic!("expected Submenu row"),
+        }
+        match &rows[3] {
+            Row::GroupHeader { title } => assert_eq!(title, "ALPHA"),
+            _ => panic!("expected GroupHeader row"),
+        }
+        match &rows[4] {
+            Row::Submenu { title, rows } => {
+                assert_eq!(title, "SUBY");
+                assert_eq!(rows[0].prompt(), "B");
+            }
+            _ => panic!("expected Submenu row"),
+        }
+    }
+
+    #[test]
+    fn group_and_submenu_combine_into_nested_submenu_under_header() {
+        let core = parse(
+            r#"
+custom_features:
+  a:
+    group: ADVANCED
+    submenu: TIMING
+    prompt: A
+    choices:
+      'Off': disabled
+      'On': enabled
+  b:
+    group: ADVANCED
+    submenu: TIMING
+    prompt: B
+    choices:
+      'Off': disabled
+      'On': enabled
+"#,
+        );
+        let rows = build_menu(&core);
+        assert_eq!(rows.len(), 2);
+        match &rows[0] {
+            Row::GroupHeader { title } => assert_eq!(title, "ADVANCED"),
+            _ => panic!("expected GroupHeader row"),
+        }
+        match &rows[1] {
+            Row::Submenu { title, rows } => {
+                assert_eq!(title, "TIMING");
                 assert_eq!(rows.len(), 2);
                 assert_eq!(rows[0].prompt(), "A");
                 assert_eq!(rows[1].prompt(), "B");
             }
             _ => panic!("expected Submenu row"),
         }
+    }
+
+    #[test]
+    fn ungrouped_feature_unaffected_by_sibling_group() {
+        let core = parse(
+            r#"
+custom_features:
+  plain:
+    prompt: PLAIN
+    choices:
+      'Off': disabled
+      'On': enabled
+  grouped:
+    group: ADVANCED
+    prompt: GROUPED
+    choices:
+      'Off': disabled
+      'On': enabled
+"#,
+        );
+        let rows = build_menu(&core);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].prompt(), "PLAIN");
+        match &rows[1] {
+            Row::GroupHeader { title } => assert_eq!(title, "ADVANCED"),
+            _ => panic!("expected GroupHeader row"),
+        }
+        assert_eq!(rows[2].prompt(), "GROUPED");
+    }
+
+    #[test]
+    fn shared_features_remain_trailing_placeholders_with_groups_and_submenus() {
+        let core = parse(
+            r#"
+shared_features:
+  - autosave
+  - use_guns
+custom_features:
+  a:
+    group: ADVANCED
+    submenu: TIMING
+    prompt: A
+    choices:
+      'Off': disabled
+      'On': enabled
+"#,
+        );
+        let rows = build_menu(&core);
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0], Row::GroupHeader { .. }));
+        assert!(matches!(rows[1], Row::Submenu { .. }));
+        assert_eq!(rows[2].prompt(), "autosave");
+        assert_eq!(rows[3].prompt(), "use_guns");
+        assert!(matches!(rows[2], Row::Placeholder { .. }));
+        assert!(matches!(rows[3], Row::Placeholder { .. }));
     }
 
     #[test]
