@@ -2,10 +2,18 @@ use crate::app::{App, Popup};
 use crate::model::Row;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
+
+fn highlight_style() -> Style {
+    Style::default()
+        .bg(Color::Blue)
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD)
+}
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -46,31 +54,33 @@ fn draw_rows(f: &mut Frame, area: Rect, app: &App) {
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("Options"))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .highlight_style(highlight_style());
 
     f.render_stateful_widget(list, area, &mut state);
 }
 
 fn row_item(row: &Row, app: &App) -> ListItem<'static> {
-    let line = match row {
-        Row::Submenu { title, .. } => format!("{title} >"),
-        Row::GroupHeader { title } => format!("── {title} ──"),
-        Row::Toggle { key, prompt, .. } => {
-            let val = app.selection(key).unwrap_or("");
-            format!("{prompt:<40} [{val}]")
+    let line: Line<'static> = match row {
+        Row::Submenu { title, .. } => {
+            Line::from(format!("{title} >")).style(Style::default().fg(Color::Cyan))
         }
-        Row::Choice { key, prompt, .. } => {
+        Row::GroupHeader { title } => Line::from(format!("── {title} ──")).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Row::Toggle { key, prompt, .. } | Row::Choice { key, prompt, .. } => {
             let val = app.selection(key).unwrap_or("");
-            format!("{prompt:<40} [{val}]")
+            Line::from(vec![
+                Span::raw(format!("{prompt:<40} ")),
+                Span::styled(format!("[{val}]"), Style::default().fg(Color::Green)),
+            ])
         }
-        Row::Placeholder { label, note } => format!("{label} {note}"),
+        Row::Placeholder { label, note } => {
+            Line::from(format!("{label} {note}")).style(Style::default().add_modifier(Modifier::DIM))
+        }
     };
-    let style = match row {
-        Row::Placeholder { .. } => Style::default().add_modifier(Modifier::DIM),
-        Row::GroupHeader { .. } => Style::default().add_modifier(Modifier::BOLD),
-        _ => Style::default(),
-    };
-    ListItem::new(line).style(style)
+    ListItem::new(line)
 }
 
 fn draw_description(f: &mut Frame, area: Rect, app: &App) {
@@ -125,7 +135,7 @@ fn draw_popup(f: &mut Frame, area: Rect, popup: &Popup) {
                 .borders(Borders::ALL)
                 .title(popup.prompt.clone()),
         )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .highlight_style(highlight_style());
 
     f.render_stateful_widget(list, rect, &mut state);
 }
