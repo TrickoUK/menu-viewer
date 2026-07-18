@@ -1,0 +1,13 @@
+[package]
+name = "menu-viewer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+clap = { version = "4.6.2", features = ["derive"] }
+crossterm = "0.29.0"
+indexmap = { version = "2.14.0", features = ["serde"] }
+ratatui = "0.30.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
