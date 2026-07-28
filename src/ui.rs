@@ -1,4 +1,4 @@
-use crate::app::{App, Popup};
+use crate::app::{App, ConfirmDialog, Popup};
 use crate::model::Row;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -33,6 +33,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Some(popup) = app.popup() {
         draw_popup(f, area, popup);
     }
+
+    if let Some(confirm) = app.confirm_dialog() {
+        draw_confirm(f, area, confirm, app.enabled_diff().len());
+    }
 }
 
 fn draw_title(f: &mut Frame, area: Rect, app: &App) {
@@ -60,6 +64,19 @@ fn draw_rows(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn row_item(row: &Row, app: &App) -> ListItem<'static> {
+    // Toggle/Choice rows that are currently disabled render as a single
+    // flat grey line, deliberately bypassing the normal green `[value]`
+    // span below: patching a style onto the Line's own style would only
+    // affect spans that don't already set their own color, and the value
+    // span explicitly sets green, which would otherwise still win.
+    if let Some(key) = row.key() {
+        if !app.is_enabled(key) {
+            let val = app.selection(key).unwrap_or("");
+            let text = format!("{:<40} [{val}]", row.prompt());
+            return ListItem::new(Line::from(text).style(Style::default().fg(Color::DarkGray)));
+        }
+    }
+
     let line: Line<'static> = match row {
         Row::Submenu { title, .. } => {
             Line::from(format!("{title} >")).style(Style::default().fg(Color::Cyan))
@@ -76,7 +93,7 @@ fn row_item(row: &Row, app: &App) -> ListItem<'static> {
                 Span::styled(format!("[{val}]"), Style::default().fg(Color::Green)),
             ])
         }
-        Row::Placeholder { label, note } => {
+        Row::Placeholder { label, note, .. } => {
             Line::from(format!("{label} {note}")).style(Style::default().add_modifier(Modifier::DIM))
         }
     };
@@ -134,6 +151,29 @@ fn draw_popup(f: &mut Frame, area: Rect, popup: &Popup) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(popup.prompt.clone()),
+        )
+        .highlight_style(highlight_style());
+
+    f.render_stateful_widget(list, rect, &mut state);
+}
+
+fn draw_confirm(f: &mut Frame, area: Rect, confirm: &ConfirmDialog, pending: usize) {
+    let rect = centered_rect(50, 30, area);
+    f.render_widget(Clear, rect);
+
+    let items = vec![
+        ListItem::new("Save and exit"),
+        ListItem::new("Discard and exit"),
+    ];
+
+    let mut state = ListState::default();
+    state.select(Some(confirm.cursor));
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("{pending} pending change(s) — save to file?")),
         )
         .highlight_style(highlight_style());
 

@@ -33,18 +33,43 @@ fn render_row(row: &Row, prefix: &str, connector: &str, child_prefix: &str) -> S
         Row::GroupHeader { title } => {
             format!("{prefix}{connector}{}\n", format!("── {title} ──").yellow().bold())
         }
-        Row::Toggle {
-            prompt, choices, ..
-        } => format!(
-            "{prefix}{connector}{prompt}  {}\n",
-            format_choices(&choices[..])
-        ),
-        Row::Choice {
-            prompt, choices, ..
-        } => format!("{prefix}{connector}{prompt}  {}\n", format_choices(choices)),
-        Row::Placeholder { label, note } => {
+        Row::Toggle { prompt, choices, .. } => {
+            render_choice_like_row(prefix, connector, prompt, &choices[..], row.enabled())
+        }
+        Row::Choice { prompt, choices, .. } => {
+            render_choice_like_row(prefix, connector, prompt, choices, row.enabled())
+        }
+        Row::Placeholder { label, note, .. } => {
             format!("{prefix}{connector}{}\n", format!("{label} {note}").dim())
         }
+    }
+}
+
+/// Toggle/Choice rows share identical rendering apart from their choice
+/// list's concrete type. This reflects each row's own baked `enabled`
+/// field only (there's no live `App` in `--tree` mode) — a disabled row
+/// bypasses `format_choices`'s per-kind coloring entirely and prints as a
+/// single flat grey line, rather than wrapping colored spans in a dim
+/// style (which wouldn't grey out the green-bracketed default choice).
+fn render_choice_like_row(
+    prefix: &str,
+    connector: &str,
+    prompt: &str,
+    choices: &[(String, String)],
+    enabled: bool,
+) -> String {
+    if enabled {
+        format!("{prefix}{connector}{prompt}  {}\n", format_choices(choices))
+    } else {
+        let plain = choices
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>()
+            .join(" / ");
+        format!(
+            "{prefix}{connector}{}\n",
+            format!("{prompt}  {plain}").dark_grey()
+        )
     }
 }
 
@@ -124,11 +149,13 @@ mod tests {
                         ("Off".to_string(), "off".to_string()),
                         ("On".to_string(), "on".to_string()),
                     ],
+                    enabled: true,
                 }],
             },
             Row::Placeholder {
                 label: "SLIDER".to_string(),
                 note: "(preset-based option, not shown)",
+                enabled: true,
             },
         ];
 
@@ -142,15 +169,38 @@ mod tests {
     }
 
     #[test]
+    fn disabled_toggle_row_renders_as_flat_grey_line_without_green_bracket() {
+        let rows = vec![Row::Toggle {
+            key: "k".to_string(),
+            prompt: "FRAMESKIP".to_string(),
+            description: None,
+            choices: [
+                ("Off".to_string(), "off".to_string()),
+                ("On".to_string(), "on".to_string()),
+            ],
+            enabled: false,
+        }];
+
+        let raw = render_rows(&rows, "");
+        // The whole line should carry exactly one style span (grey), not a
+        // green bracket around the default choice.
+        assert!(!raw.contains("[Off]"));
+        let stripped = strip_ansi(&raw);
+        assert_eq!(stripped, "└── FRAMESKIP  Off / On\n");
+    }
+
+    #[test]
     fn last_row_uses_corner_connector() {
         let rows = vec![
             Row::Placeholder {
                 label: "A".to_string(),
                 note: "n",
+                enabled: true,
             },
             Row::Placeholder {
                 label: "B".to_string(),
                 note: "n",
+                enabled: true,
             },
         ];
         let out = strip_ansi(&render_rows(&rows, ""));

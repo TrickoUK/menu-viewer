@@ -1,5 +1,6 @@
 mod app;
 mod model;
+mod source;
 mod tree;
 mod ui;
 
@@ -77,9 +78,12 @@ fn main() -> Result<()> {
 
     let contents = std::fs::read_to_string(&yml_path)
         .with_context(|| format!("failed to read {}", yml_path.display()))?;
-    let core: CoreYml = serde_yaml::from_str(&contents)
+    let mut core: CoreYml = serde_yaml::from_str(&contents)
         .with_context(|| format!("failed to parse {} as a core yml", yml_path.display()))?;
-    let root = build_menu(&core);
+    let mut source = source::SourceFile::scan(&contents);
+    let enabled_overrides = source.enabled_overrides();
+    source.merge_into(&mut core);
+    let root = build_menu(&core, &enabled_overrides);
 
     if cli.tree {
         tree::print_tree(&root);
@@ -109,7 +113,37 @@ fn main() -> Result<()> {
         }
     }
 
+    if app.write_requested() {
+        for (key, enabled) in app.enabled_diff() {
+            source.set_enabled(&key, enabled);
+        }
+        write_atomically(&yml_path, &source.render())
+            .with_context(|| format!("failed to write {}", yml_path.display()))?;
+    }
+
     Ok(())
+}
+
+/// Write `contents` to `target` atomically: write to a temp file in the
+/// same directory, then rename over the target. Same-directory (and thus
+/// same-filesystem) means the rename is atomic — the real file is either
+/// fully-old or fully-new at every observable instant, and a crash
+/// mid-write leaves only an orphaned temp file, never a half-written
+/// target. This is the one place this tool ever mutates a user's file, so
+/// it's held to that standard rather than a plain `fs::write`.
+fn write_atomically(target: &Path, contents: &str) -> Result<()> {
+    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}",
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("menu-viewer"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, contents)
+        .with_context(|| format!("failed to write temp file {}", tmp.display()))?;
+    std::fs::rename(&tmp, target).with_context(|| format!("failed to replace {}", target.display()))
 }
 
 #[cfg(test)]

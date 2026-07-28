@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_yaml::Value;
+use std::collections::HashMap;
 
 #[derive(Deserialize, Default)]
 pub struct CoreYml {
@@ -10,7 +11,7 @@ pub struct CoreYml {
     pub custom_features: IndexMap<String, CustomFeature>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct CustomFeature {
     pub group: Option<String>,
     pub submenu: Option<String>,
@@ -45,12 +46,14 @@ pub enum Row {
         prompt: String,
         description: Option<String>,
         choices: [(String, String); 2],
+        enabled: bool,
     },
     Choice {
         key: String,
         prompt: String,
         description: Option<String>,
         choices: Vec<(String, String)>,
+        enabled: bool,
     },
     Submenu {
         title: String,
@@ -66,6 +69,7 @@ pub enum Row {
     Placeholder {
         label: String,
         note: &'static str,
+        enabled: bool,
     },
 }
 
@@ -87,6 +91,30 @@ impl Row {
             Row::Submenu { .. } => None,
             Row::GroupHeader { .. } => None,
             Row::Placeholder { note, .. } => Some(note),
+        }
+    }
+
+    /// Whether this row's underlying `custom_features` block is currently
+    /// active in the source file (vs. commented out). Always `true` for
+    /// row kinds that aren't backed by a single feature block
+    /// (`Submenu`/`GroupHeader`).
+    pub fn enabled(&self) -> bool {
+        match self {
+            Row::Toggle { enabled, .. } => *enabled,
+            Row::Choice { enabled, .. } => *enabled,
+            Row::Placeholder { enabled, .. } => *enabled,
+            Row::Submenu { .. } | Row::GroupHeader { .. } => true,
+        }
+    }
+
+    /// The `custom_features` key backing this row, if any. Only
+    /// `Toggle`/`Choice` rows are toggleable via Space, so this is the
+    /// gate `App` uses to make Space a no-op on every other row kind.
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Row::Toggle { key, .. } => Some(key),
+            Row::Choice { key, .. } => Some(key),
+            Row::Submenu { .. } | Row::GroupHeader { .. } | Row::Placeholder { .. } => None,
         }
     }
 }
@@ -119,7 +147,7 @@ impl Row {
 ///    they'd otherwise occupy.
 /// 4. shared_features become Placeholder rows appended at the very end,
 ///    unaffected by any group/submenu on custom_features.
-pub fn build_menu(core: &CoreYml) -> Vec<Row> {
+pub fn build_menu(core: &CoreYml, enabled: &HashMap<String, bool>) -> Vec<Row> {
     let mut group_order: Vec<String> = Vec::new();
     let mut grouped: IndexMap<String, Vec<(&String, &CustomFeature)>> = IndexMap::new();
     let mut ungrouped: Vec<(&String, &CustomFeature)> = Vec::new();
@@ -137,12 +165,12 @@ pub fn build_menu(core: &CoreYml) -> Vec<Row> {
         }
     }
 
-    let mut top_level: Vec<Row> = bucket_by_submenu(ungrouped);
+    let mut top_level: Vec<Row> = bucket_by_submenu(ungrouped, enabled);
 
     for name in group_order {
         if let Some(features) = grouped.shift_remove(&name) {
             top_level.push(Row::GroupHeader { title: name });
-            top_level.extend(bucket_by_submenu(features));
+            top_level.extend(bucket_by_submenu(features, enabled));
         }
     }
 
@@ -150,6 +178,7 @@ pub fn build_menu(core: &CoreYml) -> Vec<Row> {
         top_level.push(Row::Placeholder {
             label: shared.clone(),
             note: "(shared feature, defined elsewhere)",
+            enabled: true,
         });
     }
 
@@ -161,13 +190,16 @@ pub fn build_menu(core: &CoreYml) -> Vec<Row> {
 /// rows). Scoped per-group by `build_menu` (and applied once to the
 /// ungrouped slice), since submenus never nest inside a group differently
 /// than described above.
-fn bucket_by_submenu<'a>(features: Vec<(&'a String, &'a CustomFeature)>) -> Vec<Row> {
+fn bucket_by_submenu<'a>(
+    features: Vec<(&'a String, &'a CustomFeature)>,
+    enabled: &HashMap<String, bool>,
+) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     let mut submenu_order: Vec<String> = Vec::new();
     let mut submenu_rows: IndexMap<String, Vec<Row>> = IndexMap::new();
 
     for (key, feature) in features {
-        let row = feature_to_row(key, feature);
+        let row = feature_to_row(key, feature, enabled);
         match &feature.submenu {
             Some(name) => {
                 submenu_rows.entry(name.clone()).or_insert_with(|| {
@@ -192,7 +224,9 @@ fn bucket_by_submenu<'a>(features: Vec<(&'a String, &'a CustomFeature)>) -> Vec<
     rows
 }
 
-fn feature_to_row(key: &str, feature: &CustomFeature) -> Row {
+fn feature_to_row(key: &str, feature: &CustomFeature, enabled: &HashMap<String, bool>) -> Row {
+    let is_enabled = enabled.get(key).copied().unwrap_or(true);
+
     let choices: Vec<(String, String)> = feature
         .choices
         .iter()
@@ -208,6 +242,7 @@ fn feature_to_row(key: &str, feature: &CustomFeature) -> Row {
         return Row::Placeholder {
             label: feature.prompt.clone(),
             note: "(preset-based option, not shown)",
+            enabled: is_enabled,
         };
     }
 
@@ -218,6 +253,7 @@ fn feature_to_row(key: &str, feature: &CustomFeature) -> Row {
             prompt: feature.prompt.clone(),
             description: feature.description.clone(),
             choices: arr,
+            enabled: is_enabled,
         };
     }
 
@@ -226,6 +262,7 @@ fn feature_to_row(key: &str, feature: &CustomFeature) -> Row {
         prompt: feature.prompt.clone(),
         description: feature.description.clone(),
         choices,
+        enabled: is_enabled,
     }
 }
 
@@ -254,7 +291,7 @@ custom_features:
       'On': enabled
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert_eq!(rows[0].prompt(), "ZETA");
         assert_eq!(rows[1].prompt(), "ALPHA");
     }
@@ -272,7 +309,7 @@ custom_features:
       4x: four
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         match &rows[0] {
             Row::Choice { choices, .. } => {
                 assert_eq!(choices[0].0, "1x");
@@ -302,7 +339,7 @@ custom_features:
       'On': enabled
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert_eq!(rows.len(), 3);
         match &rows[0] {
             Row::GroupHeader { title } => assert_eq!(title, "ADVANCED"),
@@ -340,7 +377,7 @@ custom_features:
       'On': enabled
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert_eq!(rows.len(), 5);
 
         match &rows[0] {
@@ -395,7 +432,7 @@ custom_features:
       'On': enabled
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert_eq!(rows.len(), 2);
         match &rows[0] {
             Row::GroupHeader { title } => assert_eq!(title, "ADVANCED"),
@@ -430,7 +467,7 @@ custom_features:
       'On': enabled
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].prompt(), "PLAIN");
         match &rows[1] {
@@ -457,7 +494,7 @@ custom_features:
       'On': enabled
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[0], Row::GroupHeader { .. }));
         assert!(matches!(rows[1], Row::Submenu { .. }));
@@ -485,7 +522,7 @@ custom_features:
       C: c
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert!(matches!(rows[0], Row::Toggle { .. }));
         assert!(matches!(rows[1], Row::Choice { .. }));
     }
@@ -500,7 +537,7 @@ custom_features:
     preset: something
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert!(matches!(rows[0], Row::Placeholder { .. }));
     }
 
@@ -516,7 +553,7 @@ custom_features:
       'On': enabled
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert_eq!(rows[0].description(), None);
     }
 
@@ -535,7 +572,7 @@ custom_features:
       'On': enabled
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[1].prompt(), "autosave");
         assert_eq!(rows[2].prompt(), "use_guns");
@@ -566,7 +603,7 @@ custom_features:
       'On': true
 "#,
         );
-        let rows = build_menu(&core);
+        let rows = build_menu(&core, &HashMap::new());
         match &rows[0] {
             Row::Choice { choices, .. } => {
                 assert_eq!(choices[0], ("Auto".to_string(), "auto".to_string()));
@@ -582,5 +619,81 @@ custom_features:
             }
             _ => panic!("expected Toggle row"),
         }
+    }
+
+    #[test]
+    fn enabled_override_marks_toggle_row_disabled() {
+        let core = parse(
+            r#"
+custom_features:
+  a:
+    prompt: A
+    choices:
+      'Off': disabled
+      'On': enabled
+"#,
+        );
+        let mut overrides = HashMap::new();
+        overrides.insert("a".to_string(), false);
+        let rows = build_menu(&core, &overrides);
+        assert!(!rows[0].enabled());
+    }
+
+    #[test]
+    fn missing_key_in_overrides_defaults_to_enabled() {
+        let core = parse(
+            r#"
+custom_features:
+  a:
+    prompt: A
+    choices:
+      'Off': disabled
+      'On': enabled
+"#,
+        );
+        let rows = build_menu(&core, &HashMap::new());
+        assert!(rows[0].enabled());
+        assert_eq!(rows[0].key(), Some("a"));
+    }
+
+    #[test]
+    fn enabled_override_applies_to_choice_and_placeholder_rows() {
+        let core = parse(
+            r#"
+custom_features:
+  c:
+    prompt: C
+    choices:
+      A: a
+      B: b
+      C: c
+  p:
+    prompt: P
+    preset: something
+"#,
+        );
+        let mut overrides = HashMap::new();
+        overrides.insert("c".to_string(), false);
+        overrides.insert("p".to_string(), false);
+        let rows = build_menu(&core, &overrides);
+
+        assert!(matches!(rows[0], Row::Choice { .. }));
+        assert!(!rows[0].enabled());
+        assert!(matches!(rows[1], Row::Placeholder { .. }));
+        assert!(!rows[1].enabled());
+        // Placeholder rows aren't backed by a toggleable key.
+        assert_eq!(rows[1].key(), None);
+    }
+
+    #[test]
+    fn shared_feature_placeholders_are_always_enabled() {
+        let core = parse(
+            r#"
+shared_features:
+  - autosave
+"#,
+        );
+        let rows = build_menu(&core, &HashMap::new());
+        assert!(rows[0].enabled());
     }
 }
